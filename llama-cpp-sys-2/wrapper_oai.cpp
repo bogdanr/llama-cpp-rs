@@ -25,6 +25,31 @@ struct llama_rs_chat_parse_state_oaicompat {
         : syntax(std::move(syntax_in)) {}
 };
 
+static json chat_msg_diff_to_json_oaicompat(const common_chat_msg_diff & diff) {
+    json out = json::object();
+    out["role"] = "assistant";
+    if (!diff.reasoning_content_delta.empty()) {
+        out["reasoning_content"] = diff.reasoning_content_delta;
+    }
+    if (!diff.content_delta.empty()) {
+        out["content"] = diff.content_delta;
+    }
+    if (diff.tool_call_index != std::string::npos) {
+        json tool_call = json::object();
+        tool_call["index"] = diff.tool_call_index;
+        if (!diff.tool_call_delta.id.empty()) {
+            tool_call["id"] = diff.tool_call_delta.id;
+        }
+        tool_call["type"] = "function";
+        tool_call["function"] = {
+            {"name", diff.tool_call_delta.name},
+            {"arguments", diff.tool_call_delta.arguments},
+        };
+        out["tool_calls"] = json::array({ tool_call });
+    }
+    return out;
+}
+
 static std::string random_string(size_t length = 32) {
     static constexpr char chars[] =
         "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -854,7 +879,7 @@ extern "C" llama_rs_status llama_rs_chat_msg_diff_to_oaicompat_json(
             msg_diff.tool_call_delta.id =
                 diff->tool_call_delta.id ? diff->tool_call_delta.id : "";
         }
-        auto json_delta = common_chat_msg_diff_to_json_oaicompat(msg_diff).dump();
+        auto json_delta = chat_msg_diff_to_json_oaicompat(msg_diff).dump();
         *out_json = llama_rs_dup_string(json_delta);
         return *out_json ? LLAMA_RS_STATUS_OK : LLAMA_RS_STATUS_ALLOCATION_FAILED;
     } catch (const std::exception &) {
