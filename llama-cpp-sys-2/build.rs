@@ -227,6 +227,52 @@ fn is_hidden(e: &DirEntry) -> bool {
         .unwrap_or_default()
 }
 
+// The fused Gated Delta Net support check in llama-context.cpp asserts that
+// every GATED_DELTA_NET node is named __fgdn_ar__/__fgdn_ch__, but on the CPU
+// reserve path they still carry ggml's default node_N names, so hybrid GDN
+// models like gemma-4 abort with GGML_ASSERT while building the context.
+// Turn the assert into the same fallback the device-mismatch case already uses:
+// drop the fused path and run the non-fused one (no CPU speedup lost, see
+// ggml-org/llama.cpp#24298). Patched here so the submodule stays clean; it's a
+// no-op on an already-patched tree and panics if the upstream lines move.
+fn patch_fgdn_fallback(llama_src: &Path) {
+    let path = llama_src.join("src/llama-context.cpp");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+
+    // Already patched (e.g. an incremental rebuild) - nothing to do.
+    if source.contains("gdn-name-fallback") {
+        return;
+    }
+
+    let replacements = [
+        (
+            "                GGML_ASSERT(strncmp(n->name, LLAMA_TENSOR_NAME_FGDN_AR \"-\", prefix_len) == 0);",
+            "                if (strncmp(n->name, LLAMA_TENSOR_NAME_FGDN_AR \"-\", prefix_len) != 0) { /* gdn-name-fallback */\n                    LLAMA_LOG_WARN(\"%s: fused Gated Delta Net node has unexpected name '%s'; disabling fused (autoregressive) path\\n\", __func__, n->name);\n                    gdn_device_mismatch = true;\n                    break;\n                }",
+        ),
+        (
+            "                GGML_ASSERT(strncmp(n->name, LLAMA_TENSOR_NAME_FGDN_CH \"-\", prefix_len) == 0);",
+            "                if (strncmp(n->name, LLAMA_TENSOR_NAME_FGDN_CH \"-\", prefix_len) != 0) { /* gdn-name-fallback */\n                    LLAMA_LOG_WARN(\"%s: fused Gated Delta Net node has unexpected name '%s'; disabling fused (chunked) path\\n\", __func__, n->name);\n                    gdn_device_mismatch = true;\n                    break;\n                }",
+        ),
+    ];
+
+    let mut patched = source.clone();
+    for (from, to) in replacements {
+        let before = patched.len();
+        patched = patched.replace(from, to);
+        if patched.len() == before {
+            panic!(
+                "GDN name fallback patch didn't match in {} (llama.cpp source moved?); fix build.rs",
+                path.display()
+            );
+        }
+    }
+
+    std::fs::write(&path, patched)
+        .unwrap_or_else(|e| panic!("failed to write patched {}: {e}", path.display()));
+    println!("cargo:warning=applied Gated Delta Net name fallback patch to llama-context.cpp");
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
@@ -237,6 +283,7 @@ fn main() {
     let target_dir = get_cargo_target_dir().unwrap();
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("Failed to get CARGO_MANIFEST_DIR");
     let llama_src = Path::new(&manifest_dir).join("llama.cpp");
+    patch_fgdn_fallback(&llama_src);
     let build_shared_libs = cfg!(feature = "dynamic-link");
 
     let build_shared_libs = std::env::var("LLAMA_BUILD_SHARED_LIBS")
