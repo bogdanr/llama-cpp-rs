@@ -633,6 +633,25 @@ fn main() {
         }
     }
 
+    // Also forward GGML_ environment variables as CMake cache entries, so a
+    // downstream can toggle any ggml build option without patching this build
+    // script. The motivating case is `GGML_CPU_REPACK=OFF`: repack rewrites
+    // Q4_0 weights into a runtime-only layout in anonymous memory, which
+    // disables mmap and forces a full resident copy — fine when the model fits
+    // in RAM, but fatal for larger-than-RAM mmap streaming, where we need the
+    // weights to stay file-backed and page in on demand.
+    //
+    // Precedence: options this build script sets explicitly further down
+    // (GGML_NATIVE, GGML_AVX*, GGML_CUDA, …) are defined after this loop and so
+    // win over any env value; only options left unset here (such as
+    // GGML_CPU_REPACK) are actually overridable via the environment.
+    for (key, value) in env::vars() {
+        if key.starts_with("GGML_") {
+            println!("cargo:rerun-if-env-changed={key}");
+            config.define(&key, &value);
+        }
+    }
+
     // extract the target-cpu config value, if specified
     let target_cpu = std::env::var("CARGO_ENCODED_RUSTFLAGS")
         .ok()
